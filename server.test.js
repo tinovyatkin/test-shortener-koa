@@ -1,7 +1,7 @@
 "use strict";
 
 const request = require("supertest");
-const Redis = require("ioredis");
+const Redis = require("ioredis-mock");
 
 const app = require("./server");
 

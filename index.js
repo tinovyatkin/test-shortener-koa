@@ -1,6 +1,8 @@
 "use strict";
 
-const Redis = require("ioredis");
+// Uncomment this to use real redis server
+// const Redis = require("ioredis");
+const Redis = require("ioredis-mock");
 const app = require("./server");
 
 async function start(done) {
