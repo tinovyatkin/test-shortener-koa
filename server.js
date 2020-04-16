@@ -20,7 +20,7 @@ router.all("*", async (ctx, next) => {
   if (!ctx.session.token) {
     // check if we have a header
     const auth = ctx.get("Authorization");
-    if (/^token\s\w+$/i.test(auth)) ctx.session.token = auth.substr(6);
+    if (/^token\s\S+$/i.test(auth)) ctx.session.token = auth.substr(6);
     else ctx.session.token = nanoid(30); // token length set a magic number here :-)
   }
   return next();
@@ -29,7 +29,7 @@ router.all("*", async (ctx, next) => {
 /**
  * Handles post request to '/' by creating short URL
  *
- * Expected body: { "url": "https://somethingtoshorten..." }
+ * Expected body: { "url": "https://somethingtoshorten...", "expire": optional expiration time in second }
  * Expected result - 201 -> { "shortUrl": "http://localhost...", "token": "..." }
  * @example
  * curl -X POST http://localhost:3000/ -d '{"url": "https://microsoft.com/tada"}' -H "Content-Type: application/json"
@@ -38,6 +38,7 @@ router.post("/", async (ctx, next) => {
   const {
     url,
     baseUrl = `http://localhost:${ctx.app.context.port}`,
+    expire,
   } = ctx.request.body;
   // verify that url is in correct format - URL constructor throws if it doesn't
   new URL(url);
@@ -70,6 +71,9 @@ router.post("/", async (ctx, next) => {
   });
   ctx.assert(res === "OK", 501, `Failed to set key ${linkid} to Redis`);
 
+  // if we have an expiration on parameters then set it
+  if (expire) await redis.expire(linkid, expire);
+
   console.info("Created short link %s for link %s", linkid, url);
   ctx.status = 201; // created
   ctx.type = "json";
@@ -84,15 +88,22 @@ router.post("/", async (ctx, next) => {
 });
 
 /**
+ * All methods bellow requiring valid linkId, so validate it here
+ * for all
+ */
+router.param("linkid", async (linkid, ctx, next) => {
+  ctx.assert(linkid.length === LINKID_LEN, 422, `Invalid link id`);
+  return next();
+});
+
+/**
  * Handles GET request to a link by unfurling and redirecting
  *
  * @example
  * curl http://localhost:3000/afdewb -> 301, Location: https://microsoft.com/tada
  */
-router.get("/:linkid", async (ctx, next) => {
-  // basic validate
+router.get("/:linkid", async (ctx) => {
   const { linkid } = ctx.params;
-  ctx.assert(linkid.length === LINKID_LEN, 422, `Invalid link id`);
 
   /** @type {import('ioredis').Redis} */
   const redis = ctx.app.context.redis;
@@ -103,10 +114,32 @@ router.get("/:linkid", async (ctx, next) => {
     .hget(linkid, "url")
     .exec();
 
+  ctx.assert(fullUrl, 404, `There is no ${linkid} on this server`);
+
   ctx.status = 301; // permanent redirect? or 302?
   ctx.set("X-Accessed", accessed); // for tests
   ctx.redirect(fullUrl);
+});
 
+/**
+ * All routes below requires Token validation, so, makes it here
+ */
+router.all("/:linkid", async (ctx, next) => {
+  // GET method doesn't need authentication?
+  if (ctx.method === "GET") return next();
+
+  const { linkid } = ctx.params;
+  /** @type {import('ioredis').Redis} */
+  const redis = ctx.app.context.redis;
+
+  const token = await redis.hget(linkid, "token");
+  // respond 404 when link not found
+  ctx.assert(token, 404, `There is no ${linkid} on this server`);
+  ctx.assert(
+    token === ctx.session.token,
+    401 /* Authentication required */,
+    `Invalid link update token`
+  );
   return next();
 });
 
@@ -117,19 +150,10 @@ router.get("/:linkid", async (ctx, next) => {
  * curl -X DELETE -H "Authorization: Token <ACCESS_TOKEN>" http://localhost:3000/bukFJHSL
  */
 router.delete("/:linkid", async (ctx, next) => {
-  // basic validate
   const { linkid } = ctx.params;
-  ctx.assert(linkid.length === LINKID_LEN, 422, `Invalid link id`);
 
   /** @type {import('ioredis').Redis} */
   const redis = ctx.app.context.redis;
-
-  const token = await redis.hget(linkid, "token");
-  ctx.assert(
-    token === ctx.session.token,
-    401 /* Authentication required */,
-    "Invalid link delete token"
-  );
 
   // delete it, non-blocking way
   const res = await redis.unlink(linkid);
@@ -137,6 +161,34 @@ router.delete("/:linkid", async (ctx, next) => {
   ctx.status = 200;
   ctx.type = "json";
   ctx.body = { removed: res };
+
+  return next();
+});
+
+/**
+ * Update existing short link using a token
+ * @example
+ * curl -X PATCH -H "Authorization: Token <ACCESS_TOKEN>" http://localhost:3000/bukFJHSL -d '{"url": "https://microsoft.com/new", "expire": 3600}'
+ */
+router.patch("/:linkid", async (ctx, next) => {
+  const { linkid } = ctx.params;
+  const { url, expire } = ctx.request.body;
+
+  /** @type {import('ioredis').Redis} */
+  const redis = ctx.app.context.redis;
+
+  // updates existing link
+  if (url) {
+    // validate new url
+    new URL(url);
+    await redis.hset(linkid, "url", url);
+  }
+  if (expire) {
+    await redis.expire(linkid, expire);
+  }
+  ctx.status = 200;
+  ctx.type = "json";
+  ctx.body = { status: "success" };
 
   return next();
 });

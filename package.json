@@ -4,7 +4,8 @@
   "description": "Link Shortener",
   "main": "index.js",
   "scripts": {
-    "test": "jest"
+    "test": "jest --coverage",
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=12"
