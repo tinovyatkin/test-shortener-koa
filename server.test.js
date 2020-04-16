@@ -117,4 +117,24 @@ describe("Link shortener server", () => {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     await request(server).get(`/${body.linkid}`).expect(404);
   });
+
+  it("should avoid linkid collisions", async () => {
+    // mocking hexist
+    const hexistsMock = jest.fn().mockResolvedValueOnce("tada");
+    const originalHexists = app.context.redis.hexists;
+    app.context.redis.hexists = hexistsMock;
+    const {
+      body: { shortLink },
+    } = await request(server)
+      .post("/")
+      .set("Content-Type", "application/json")
+      .send({ url: TEST_LINK })
+      .expect("Content-Type", /json/)
+      .expect(201);
+    expect(hexistsMock).toHaveBeenCalledTimes(2);
+    const url = new URL(shortLink);
+    expect(hexistsMock).toHaveBeenLastCalledWith(url.pathname.slice(1), "url");
+    // restore to not messup other tests
+    app.context.redis.hexists = originalHexists;
+  });
 });
